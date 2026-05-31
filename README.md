@@ -35,3 +35,6 @@ The bot returns the correlation coefficient and a strength label (Very strong, S
 ## Commands
 
   /start or /help — Show usage instructions
+
+## Try it
+[@FX_C_C_bot](https://t.me/FX_C_C_bot)
