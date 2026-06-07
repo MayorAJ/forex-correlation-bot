@@ -10,27 +10,27 @@ Usage (in Telegram):
   EURUSD GBPUSD
 
 Setup:
-  1. pip install yfinance requests
-  2. Fill in TELEGRAM_BOT_TOKEN below
+  1. pip install requests python-dotenv
+  2. Add TELEGRAM_BOT_TOKEN to your .env file
   3. Run: python fx_correlation_bot.py
 """
 
 import requests
 import logging
 import time
-import yfinance as yf
-import pandas as pd
 import os
-from dotenv import load_dotenv
+from datetime import datetime, timedelta
 from itertools import combinations
+from dotenv import load_dotenv
+
+load_dotenv()
 
 # ---------------------------------------------
 # CONFIG
 # ---------------------------------------------
-load_dotenv()
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 LOOKBACK_DAYS      = 14
-POLL_INTERVAL      = 2  # seconds between polling for new messages
+POLL_INTERVAL      = 2  # seconds between polling
 
 # ---------------------------------------------
 # LOGGING
@@ -61,82 +61,115 @@ def correlation_label(r):
         strength = "Weak"
     else:
         strength = "Very weak / none"
-
     direction = "positive" if r >= 0 else "negative"
     return f"{strength} {direction}"
 
 
 # ---------------------------------------------
+# FETCH RATES FROM FRANKFURTER
+# ---------------------------------------------
+def fetch_rates(base: str, symbols: list, start_date: str, end_date: str) -> dict:
+    """
+    Fetch historical daily rates from Frankfurter API.
+    Returns dict of {date: {currency: rate}}
+    """
+    url = f"https://api.frankfurter.dev/v1/{start_date}..{end_date}"
+    params = {
+        "base": base,
+        "symbols": ",".join(symbols)
+    }
+    resp = requests.get(url, params=params, timeout=15)
+    data = resp.json()
+    return data.get("rates", {})
+
+
+def get_pair_closes(pair: str, start_date: str, end_date: str) -> dict:
+    """
+    Get daily closes for a forex pair like EURUSD.
+    Splits into base (EUR) and quote (USD), fetches base rates,
+    returns {date: rate} for the pair.
+    """
+    base  = pair[:3].upper()
+    quote = pair[3:].upper()
+
+    rates = fetch_rates(base, [quote], start_date, end_date)
+
+    closes = {}
+    for date, day_rates in rates.items():
+        if quote in day_rates:
+            closes[date] = day_rates[quote]
+    return closes
+
+
+# ---------------------------------------------
 # FETCH CORRELATION
 # ---------------------------------------------
-def get_correlation(pairs: list[str]) -> str:
-    """
-    Given a list of pair strings like ['EURUSD', 'GBPUSD', 'NZDCHF'],
-    fetch 14D of daily closes from Yahoo Finance and return
-    a formatted correlation message.
-    """
-    # Convert to Yahoo Finance format e.g. EURUSD -> EURUSD=X
-    tickers = {p.upper(): f"{p.upper()}=X" for p in pairs}
+def get_correlation(pairs: list) -> str:
+    end_date   = datetime.utcnow().date()
+    # Fetch extra days to account for weekends/holidays
+    start_date = end_date - timedelta(days=LOOKBACK_DAYS + 10)
 
-    try:
-        data = yf.download(
-            list(tickers.values()),
-            period=f"{LOOKBACK_DAYS + 5}d",  # fetch a few extra days as buffer
-            interval="1d",
-            auto_adjust=True,
-            progress=False,
-        )
+    start_str = start_date.strftime("%Y-%m-%d")
+    end_str   = end_date.strftime("%Y-%m-%d")
 
-        # Extract close prices
-        if isinstance(data.columns, pd.MultiIndex):
-            closes = data["Close"]
-        else:
-            closes = data[["Close"]]
-            closes.columns = list(tickers.values())
+    # Fetch closes for each pair
+    pair_closes = {}
+    for pair in pairs:
+        try:
+            closes = get_pair_closes(pair, start_str, end_str)
+            if len(closes) < 5:
+                return f"❌ Not enough data for <b>{pair}</b>. Check the pair name and try again."
+            pair_closes[pair] = closes
+        except Exception as e:
+            log.error(f"Error fetching {pair}: {e}")
+            return f"❌ Error fetching data for <b>{pair}</b>. Try again."
 
-        # Rename columns back to pair names
-        reverse = {v: k for k, v in tickers.items()}
-        closes  = closes.rename(columns=reverse)
+    # Find common dates across all pairs
+    common_dates = sorted(
+        set.intersection(*[set(v.keys()) for v in pair_closes.values()])
+    )
 
-        # Drop rows with any NaN and take last LOOKBACK_DAYS rows
-        closes = closes.dropna().tail(LOOKBACK_DAYS)
+    # Take last LOOKBACK_DAYS common dates
+    common_dates = common_dates[-LOOKBACK_DAYS:]
 
-        if len(closes) < 5:
-            return "❌ Not enough data to calculate correlation. Check pair names and try again."
+    if len(common_dates) < 5:
+        return "❌ Not enough overlapping data across pairs. Try again."
 
-        # Calculate pairwise correlations
-        lines = [f"📊 <b>Correlation ({len(closes)}D daily closes)</b>\n"]
-        for p1, p2 in combinations(closes.columns, 2):
-            r = closes[p1].corr(closes[p2])
-            label = correlation_label(r)
-            lines.append(f"<b>{p1} vs {p2}</b>: {r:+.2f} — {label}")
+    # Build price series
+    series = {pair: [pair_closes[pair][d] for d in common_dates] for pair in pairs}
 
-        return "\n".join(lines)
+    # Calculate pairwise correlations
+    def pearson(x, y):
+        n    = len(x)
+        mx   = sum(x) / n
+        my   = sum(y) / n
+        num  = sum((x[i] - mx) * (y[i] - my) for i in range(n))
+        den  = (sum((x[i] - mx) ** 2 for i in range(n)) *
+                sum((y[i] - my) ** 2 for i in range(n))) ** 0.5
+        return num / den if den != 0 else 0.0
 
-    except Exception as e:
-        log.error(f"Correlation error: {e}")
-        return "❌ Error fetching data. Check pair names and try again."
+    lines = [f"📊 <b>Correlation ({len(common_dates)}D daily closes)</b>\n"]
+    for p1, p2 in combinations(pairs, 2):
+        r     = pearson(series[p1], series[p2])
+        label = correlation_label(r)
+        lines.append(f"<b>{p1} vs {p2}</b>: {r:+.2f} — {label}")
+
+    return "\n".join(lines)
 
 
 # ---------------------------------------------
 # PARSE PAIRS FROM MESSAGE
 # ---------------------------------------------
-def parse_pairs(text: str) -> list[str]:
-    """
-    Extract valid-looking fx pair names from a message.
-    Accepts space or comma separated input.
-    e.g. 'EURUSD GBPUSD NZDCHF' or 'eurusd, gbpusd'
-    """
+def parse_pairs(text: str) -> list:
     tokens = text.upper().replace(",", " ").split()
-    # Basic validation — pairs are typically 6 characters
-    pairs = [t for t in tokens if 4 <= len(t) <= 7 and t.isalpha()]
+    pairs  = [t for t in tokens if 3 <= len(t) <= 10]
     return pairs
 
 
 # ---------------------------------------------
-# TELEGRAM POLLING
+# TELEGRAM
 # ---------------------------------------------
-def send_message(chat_id: int, text: str):
+def send_message(chat_id, text):
     url     = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
     payload = {"chat_id": chat_id, "text": text, "parse_mode": "HTML"}
     try:
@@ -145,9 +178,9 @@ def send_message(chat_id: int, text: str):
         log.error(f"Send error: {e}")
 
 
-def get_updates(offset: int = None) -> list:
-    url     = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/getUpdates"
-    params  = {"timeout": 30, "offset": offset}
+def get_updates(offset=None):
+    url    = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/getUpdates"
+    params = {"timeout": 30, "offset": offset}
     try:
         resp = requests.get(url, params=params, timeout=35)
         return resp.json().get("result", [])
@@ -156,6 +189,9 @@ def get_updates(offset: int = None) -> list:
         return []
 
 
+# ---------------------------------------------
+# MAIN
+# ---------------------------------------------
 def main():
     log.info("FX Correlation Bot started. Listening for messages...")
     offset = None
@@ -164,8 +200,7 @@ def main():
         updates = get_updates(offset)
 
         for update in updates:
-            offset = update["update_id"] + 1
-
+            offset  = update["update_id"] + 1
             message = update.get("message", {})
             text    = message.get("text", "").strip()
             chat_id = message.get("chat", {}).get("id")
@@ -173,7 +208,6 @@ def main():
             if not text or not chat_id:
                 continue
 
-            # Help message
             if text.lower() in ["/start", "/help"]:
                 send_message(chat_id,
                     "👋 <b>FX Correlation Bot</b>\n\n"

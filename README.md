@@ -14,7 +14,7 @@ The bot returns the correlation coefficient and a strength label (Very strong, S
 
 - Minimum 2 pairs, maximum 6 pairs per request
 - Pair names must be standard 6-character forex symbols (e.g. EURUSD, GBPJPY)
-- Data is sourced from Yahoo Finance via the yfinance library
+- Data is sourced from the [Frankfurter API](https://frankfurter.dev) — free, no API key required
 - Correlation is calculated on daily closes, lookback window is 14 days
 
 ## Correlation Scale
@@ -28,9 +28,12 @@ The bot returns the correlation coefficient and a strength label (Very strong, S
 
 ## Setup
 
-1. pip install yfinance requests
-2. Add your Telegram bot token to TELEGRAM_BOT_TOKEN in the script
-3. python3 fx_correlation_bot.py
+1. `pip install requests python-dotenv`
+2. Create a `.env` file in the project folder and add your Telegram bot token:
+   ```
+   TELEGRAM_BOT_TOKEN=your_token_here
+   ```
+3. `python3 fx_correlation_bot.py`
 
 ## Commands
 
@@ -38,3 +41,6 @@ The bot returns the correlation coefficient and a strength label (Very strong, S
 
 ## Try it
 [@FX_C_C_bot](https://t.me/FX_C_C_bot)
+
+## Version
+1.1.0
